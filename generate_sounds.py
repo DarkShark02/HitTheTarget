@@ -18,10 +18,10 @@ def create_tone(filename, freq, duration_sec, volume=0.5, sample_rate=44100):
         for s in tone:
             wav_file.writeframes(struct.pack('h', int(s * 32767)))
 
-# Hit: breve pop a 800 Hz, 0.15 sec
+# Hit: short 800 Hz pop, 0.15 sec
 create_tone("hit.wav", 800, 0.15)
 
-# Combo: tre beep 440 Hz, 0.1 sec ciascuno con piccoli spazi
+# Combo: three 440 Hz beeps, 0.1 sec each with short gaps
 def create_combo(filename):
     sample_rate = 44100
     beep_duration = 0.1
@@ -56,7 +56,7 @@ def create_combo(filename):
 
 create_combo("combo.wav")
 
-# Record: tono crescente lungo 1.2 sec da 400 a 1000 Hz
+# Record: 1.2 sec rising tone from 400 to 1000 Hz
 def create_record(filename):
     sample_rate = 44100
     duration = 1.2
@@ -78,4 +78,4 @@ def create_record(filename):
 
 create_record("record.wav")
 
-print("File audio creati: hit.wav, combo.wav, record.wav")
+print("Audio files created: hit.wav, combo.wav, record.wav")

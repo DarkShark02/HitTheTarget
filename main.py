@@ -6,14 +6,26 @@ import math
 import random
 import time
 import os
+import threading
 
 WIDTH, HEIGHT = 800, 600
 RECORDS_FILE = "records.txt"
 GAME_TIME = 60
 TARGET_COUNT = 5
 
+ORANGE_POINTS = 1
+GREEN_POINTS = 10
+COMBO_POINTS = 5
+COMBO_HITS = 5
+COMBO_WINDOW = 2
+GREEN_LIFETIME = 10
+
+ORANGE = (255, 100, 0)
+GREEN = (0, 255, 0)
+YELLOW = (255, 255, 0)
+WHITE = (255, 255, 255)
+
 mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
 mp_draw = mp.solutions.drawing_utils
 
 pygame.init()
@@ -37,6 +49,16 @@ def draw_cross(surface, pos, size=5, color=(255, 0, 0)):
     pygame.draw.line(surface, color, (x - size, y), (x + size, y), 2)
     pygame.draw.line(surface, color, (x, y - size), (x, y + size), 2)
 
+def draw_star(surface, color, center, radius):
+    points = []
+    for i in range(10):
+        angle = i * math.pi / 5
+        r = radius if i % 2 == 0 else radius / 2
+        x = center[0] + r * math.cos(angle)
+        y = center[1] + r * math.sin(angle)
+        points.append((x, y))
+    pygame.draw.polygon(surface, color, points)
+
 def remap(val, old_min, old_max, new_min, new_max):
     if old_max - old_min == 0:
         return new_min
@@ -58,7 +80,7 @@ class Target:
         self.special = special
         self.hit = False
         self.spawn_time = time.time()
-        self.lifetime = 10 if special else None
+        self.lifetime = GREEN_LIFETIME if special else None
         self.speed_x = random.choice([-15, 15]) if special else random.choice([-12, -10, -8, 8, 10, 12])
         self.speed_y = random.choice([-8, -6, 6, 8]) if special else random.choice([-6, -4, -2, 2, 4, 6])
 
@@ -76,7 +98,7 @@ class Target:
                 self.hit = True
 
     def draw(self, surf):
-        color = (0, 255, 0) if self.special else (255, 100, 0)
+        color = GREEN if self.special else ORANGE
         if self.hit:
             color = (50, 100, 50) if self.special else (80, 80, 80)
         pygame.draw.circle(surf, color, (int(self.pos[0]), int(self.pos[1])), self.radius)
@@ -127,24 +149,82 @@ def save_score(score, name, orange_hits, green_hits, combo_count):
 
 def show_records(records):
     screen.fill((0, 0, 0))
-    screen.blit(font.render("PARTITA FINITA!", True, (255, 255, 255)), (WIDTH//2 - 100, 100))
-    screen.blit(font.render("\U0001F3C6 RECORD:", True, (255, 255, 0)), (WIDTH//2 - 60, 160))
+    draw_text_centered("GAME OVER!", 100, size=30)
+    draw_text_centered("HIGH SCORES", 160, size=30, color=YELLOW)
     for i, (score, name, orange, green, combo) in enumerate(records):
-        text = f"{i+1}. {name} - {score} pts | Arancioni: {orange} | Verdi: {green} | Combo: {combo}"
-        screen.blit(font.render(text, True, (255, 255, 255)), (WIDTH//2 - 220, 200 + i*40))
-    screen.blit(font.render("Alza il dito indice per giocare di nuovo", True, (150, 255, 150)), (WIDTH//2 - 220, 350))
+        text = f"{i+1}. {name} - {score} pts | Orange: {orange} | Green: {green} | Combo: {combo}"
+        draw_text_centered(text, 200 + i*40, size=24)
+    draw_text_centered("Raise your index finger to play again", 350, size=30, color=(150, 255, 150))
     pygame.display.update()
 
-def draw_text_centered(text, y, size=40, color=(255,255,255)):
+def draw_text_centered(text, y, size=40, color=WHITE):
     f = pygame.font.SysFont("Arial", size)
     surf = f.render(text, True, color)
     x = WIDTH//2 - surf.get_width()//2
     screen.blit(surf, (x, y))
 
+def draw_instructions(status, status_color):
+    screen.fill((0, 0, 0))
+    draw_text_centered("HIT THE TARGET", 40, size=56, color=YELLOW)
+
+    draw_text_centered("HOW TO PLAY", 130, size=30, color=(150, 200, 255))
+    draw_text_centered("Raise only your INDEX finger and touch the balls to pop them.", 175, size=24)
+    draw_text_centered(f"Pop as many balls as you can in {GAME_TIME} seconds!", 210, size=24)
+
+    draw_text_centered("POINTS", 270, size=30, color=(150, 200, 255))
+    rows_x = 170
+    item_font = pygame.font.SysFont("Arial", 24)
+
+    pygame.draw.circle(screen, ORANGE, (rows_x, 330), 18)
+    screen.blit(item_font.render(f"Orange ball:  {ORANGE_POINTS} pt", True, WHITE), (rows_x + 40, 316))
+
+    pygame.draw.circle(screen, GREEN, (rows_x, 385), 16)
+    screen.blit(item_font.render(f"Green ball (rare, fast, vanishes after {GREEN_LIFETIME}s):  {GREEN_POINTS} pts",
+                                 True, WHITE), (rows_x + 40, 371))
+
+    draw_star(screen, YELLOW, (rows_x, 440), 20)
+    screen.blit(item_font.render(f"Combo ({COMBO_HITS} pops within {COMBO_WINDOW}s):  +{COMBO_POINTS} pts",
+                                 True, WHITE), (rows_x + 40, 426))
+
+    draw_text_centered(status, 520, size=30, color=status_color)
+    pygame.display.update()
+
+def load_resources():
+    """Opens the camera and the hand tracking model while showing the instructions screen."""
+    loaded = {}
+
+    def worker():
+        cap = cv2.VideoCapture(0)
+        cap.set(3, WIDTH)
+        cap.set(4, HEIGHT)
+        hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+        # The first frame processed is slow, so warm up the model here
+        success, frame = cap.read()
+        if success:
+            hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        loaded["cap"] = cap
+        loaded["hands"] = hands
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN and not thread.is_alive():
+                return loaded["cap"], loaded["hands"]
+
+        if thread.is_alive():
+            dots = "." * (int(time.time() * 2) % 4)
+            draw_instructions(f"Loading camera{dots}", (200, 200, 200))
+        else:
+            draw_instructions("Ready! Press ENTER to continue", (150, 255, 150))
+        clock.tick(30)
+
 def main():
-    cap = cv2.VideoCapture(0)
-    cap.set(3, WIDTH)
-    cap.set(4, HEIGHT)
+    cap, hands = load_resources()
 
     name = ""
     input_active = True
@@ -164,18 +244,18 @@ def main():
                         name += event.unicode
 
         screen.fill((0,0,0))
-        draw_text_centered("Inserisci il tuo nome e premi INVIO", HEIGHT//3)
+        draw_text_centered("Enter your name and press ENTER", HEIGHT//3)
         draw_text_centered(name, HEIGHT//2)
         pygame.display.update()
         clock.tick(30)
 
     min_x, max_x = 0.18, 0.92
     min_y, max_y = -0.13, 0.62
-    print(f"Usando calibrazione fissa: X({min_x}, {max_x}), Y({min_y}, {max_y})")
+    print(f"Using fixed calibration: X({min_x}, {max_x}), Y({min_y}, {max_y})")
 
     while True:
-        punteggio = 0
-        tempo_inizio = time.time()
+        score = 0
+        start_time = time.time()
         targets = []
         last_hits_times = []
         combo_cooldown = 0
@@ -227,20 +307,20 @@ def main():
                     for t in targets:
                         if t.check_hit(finger_pos):
                             if t.special:
-                                punteggio += 10
+                                score += GREEN_POINTS
                                 green_hit_sound.play()
                                 green_hits += 1
                             else:
-                                punteggio += 1
+                                score += ORANGE_POINTS
                                 hit_sound.play()
                                 orange_hits += 1
                             now = time.time()
                             last_hits_times.append(now)
-                            last_hits_times = [ht for ht in last_hits_times if now - ht <= 2]
-                            if len(last_hits_times) >= 5:
+                            last_hits_times = [ht for ht in last_hits_times if now - ht <= COMBO_WINDOW]
+                            if len(last_hits_times) >= COMBO_HITS:
                                 if now - combo_cooldown > 1.5:
                                     combo_sound.play()
-                                    punteggio += 5
+                                    score += COMBO_POINTS
                                     combo_count += 1
                                     combo_cooldown = now
                                 last_hits_times.clear()
@@ -253,39 +333,29 @@ def main():
                 else:
                     targets.append(spawn_target_non_overlapping(targets))
 
-            rimanente = max(0, GAME_TIME - int(time.time() - tempo_inizio))
-            screen.blit(font.render(f"Tempo: {rimanente}", True, (255, 255, 255)), (10, 10))
-            screen.blit(font.render(f"Punteggio: {punteggio}", True, (255, 255, 255)), (10, 50))
-            screen.blit(font.render(f"Giocatore: {name}", True, (200, 200, 255)), (10, 90))
-            
-            # Legend in alto a destra
+            remaining = max(0, GAME_TIME - int(time.time() - start_time))
+            screen.blit(font.render(f"Time: {remaining}", True, WHITE), (10, 10))
+            screen.blit(font.render(f"Score: {score}", True, WHITE), (10, 50))
+            screen.blit(font.render(f"Player: {name}", True, (200, 200, 255)), (10, 90))
+
+            # Legend in the top right corner
             legend_x = WIDTH - 180
             legend_y = 10
 
-            # 1) Bersaglio arancione - 1 pt
-            pygame.draw.circle(screen, (255, 100, 0), (legend_x, legend_y + 10), 10)
-            screen.blit(font.render("1 pt", True, (255, 255, 255)), (legend_x + 25, legend_y))
+            # 1) Orange target - 1 pt
+            pygame.draw.circle(screen, ORANGE, (legend_x, legend_y + 10), 10)
+            screen.blit(font.render(f"{ORANGE_POINTS} pt", True, WHITE), (legend_x + 25, legend_y))
 
-            # 2) Combo - 5 pt con "esplosione" stilizzata (poligono stellato)
-            def draw_star(surface, color, center, radius):
-                points = []
-                for i in range(10):
-                    angle = i * math.pi / 5
-                    r = radius if i % 2 == 0 else radius / 2
-                    x = center[0] + r * math.cos(angle)
-                    y = center[1] + r * math.sin(angle)
-                    points.append((x, y))
-                pygame.draw.polygon(surface, color, points)
-
+            # 2) Combo - 5 pts, shown as a stylized "explosion" (star polygon)
             star_center = (legend_x, legend_y + 50)
-            draw_star(screen, (255, 255, 0), star_center, 15)
-            screen.blit(font.render("5 pt (COMBO)", True, (255, 255, 255)), (legend_x + 25, legend_y + 40))
+            draw_star(screen, YELLOW, star_center, 15)
+            screen.blit(font.render(f"{COMBO_POINTS} pt (COMBO)", True, WHITE), (legend_x + 25, legend_y + 40))
 
-            # 3) Bersaglio verde - 10 pt
-            pygame.draw.circle(screen, (0, 255, 0), (legend_x, legend_y + 90), 10)
-            screen.blit(font.render("10 pt", True, (255, 255, 255)), (legend_x + 25, legend_y + 80))
+            # 3) Green target - 10 pts
+            pygame.draw.circle(screen, GREEN, (legend_x, legend_y + 90), 10)
+            screen.blit(font.render(f"{GREEN_POINTS} pt", True, WHITE), (legend_x + 25, legend_y + 80))
 
-            if rimanente <= 0:
+            if remaining <= 0:
                 break
 
             pygame.display.update()
@@ -301,8 +371,8 @@ def main():
                     except:
                         continue
 
-        records = save_score(punteggio, name, orange_hits, green_hits, combo_count)
-        if punteggio > 0 and (len(old_scores) == 0 or punteggio > max(old_scores)):
+        records = save_score(score, name, orange_hits, green_hits, combo_count)
+        if score > 0 and (len(old_scores) == 0 or score > max(old_scores)):
             record_sound.play()
 
         show_records(records)
